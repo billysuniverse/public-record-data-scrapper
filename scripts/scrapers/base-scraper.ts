@@ -1,6 +1,6 @@
 /**
  * Base Scraper
- * 
+ *
  * Abstract base class for web scrapers with anti-detection and rate limiting
  */
 
@@ -32,6 +32,12 @@ export interface ScraperResult {
   parsingErrors?: string[]
 }
 
+export interface SearchOptions {
+  searchBy?: 'debtor' | 'securedParty'
+  dateFrom?: string // YYYY-MM-DD
+  dateTo?: string // YYYY-MM-DD
+}
+
 export abstract class BaseScraper {
   protected config: ScraperConfig
 
@@ -42,7 +48,21 @@ export abstract class BaseScraper {
   /**
    * Search for UCC filings
    */
-  abstract search(companyName: string): Promise<ScraperResult>
+  abstract search(companyName: string, options?: SearchOptions): Promise<ScraperResult>
+
+  /**
+   * Filter filings by date range (post-processing)
+   */
+  protected filterByDateRange(filings: UCCFiling[], options?: SearchOptions): UCCFiling[] {
+    if (!options?.dateFrom && !options?.dateTo) return filings
+    return filings.filter((f) => {
+      const date = new Date(f.filingDate)
+      if (isNaN(date.getTime())) return true // keep unparseable dates
+      if (options.dateFrom && date < new Date(options.dateFrom)) return false
+      if (options.dateTo && date > new Date(options.dateTo + 'T23:59:59')) return false
+      return true
+    })
+  }
 
   /**
    * Get manual search URL for fallback
@@ -60,7 +80,7 @@ export abstract class BaseScraper {
    * Sleep helper for rate limiting
    */
   protected sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms))
+    return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
   /**
@@ -80,24 +100,31 @@ export abstract class BaseScraper {
   ): Promise<{ result: T; retryCount: number }> {
     let lastError = new Error('Unknown error')
     let retriesMade = 0
-    
+
     for (let attempt = 0; attempt <= this.config.retryAttempts; attempt++) {
       try {
-        const attemptType = attempt === 0 ? 'Initial attempt' : `Retry ${attempt}/${this.config.retryAttempts}`
+        const attemptType =
+          attempt === 0 ? 'Initial attempt' : `Retry ${attempt}/${this.config.retryAttempts}`
         this.log('info', `${context} - ${attemptType}`)
         const result = await fn()
-        this.log('info', `${context} succeeded${retriesMade > 0 ? ` after ${retriesMade} ${retriesMade === 1 ? 'retry' : 'retries'}` : ' on first attempt'}`)
+        this.log(
+          'info',
+          `${context} succeeded${retriesMade > 0 ? ` after ${retriesMade} ${retriesMade === 1 ? 'retry' : 'retries'}` : ' on first attempt'}`
+        )
         return { result, retryCount: retriesMade }
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error))
-        
+
         if (attempt < this.config.retryAttempts) {
           // Check if error is retryable
           if (this.isRetryableError(lastError)) {
             retriesMade++
             // Exponential backoff: 2^attempt * 1000ms
             const backoffMs = Math.min(Math.pow(2, attempt) * 1000, 30000)
-            this.log('warn', `${context} failed: ${lastError.message}. Retrying in ${backoffMs}ms... (retry ${retriesMade}/${this.config.retryAttempts})`)
+            this.log(
+              'warn',
+              `${context} failed: ${lastError.message}. Retrying in ${backoffMs}ms... (retry ${retriesMade}/${this.config.retryAttempts})`
+            )
             await this.sleep(backoffMs)
           } else {
             // Non-retryable error - fail immediately
@@ -107,10 +134,13 @@ export abstract class BaseScraper {
         }
       }
     }
-    
+
     // If we get here, all attempts (initial + retries) have failed
     const totalAttempts = retriesMade + 1 // initial attempt + retries
-    this.log('error', `${context} failed after ${totalAttempts} ${totalAttempts === 1 ? 'attempt' : 'attempts'} (${retriesMade} ${retriesMade === 1 ? 'retry' : 'retries'})`)
+    this.log(
+      'error',
+      `${context} failed after ${totalAttempts} ${totalAttempts === 1 ? 'attempt' : 'attempts'} (${retriesMade} ${retriesMade === 1 ? 'retry' : 'retries'})`
+    )
     throw lastError
   }
 
@@ -124,17 +154,12 @@ export abstract class BaseScraper {
   protected isRetryableError(error: Error): boolean {
     // Strategy 1: Check error type/constructor name
     const errorType = error.constructor.name
-    const retryableTypes = [
-      'TimeoutError',
-      'NetworkError', 
-      'FetchError',
-      'AbortError'
-    ]
-    
+    const retryableTypes = ['TimeoutError', 'NetworkError', 'FetchError', 'AbortError']
+
     if (retryableTypes.includes(errorType)) {
       return true
     }
-    
+
     // Strategy 2: Check error code property (for Node.js system errors)
     const errorWithCode = error as Error & { code?: string }
     if (errorWithCode.code) {
@@ -147,12 +172,12 @@ export abstract class BaseScraper {
         'ENETUNREACH',
         'EAI_AGAIN'
       ]
-      
+
       if (retryableCodes.includes(errorWithCode.code)) {
         return true
       }
     }
-    
+
     // Strategy 3: Fallback to message pattern matching (less reliable but catches other cases)
     const message = error.message.toLowerCase()
     const retryablePatterns = [
@@ -168,8 +193,8 @@ export abstract class BaseScraper {
       'failed to fetch',
       'fetch failed'
     ]
-    
-    return retryablePatterns.some(pattern => message.includes(pattern))
+
+    return retryablePatterns.some((pattern) => message.includes(pattern))
   }
 
   /**
@@ -177,15 +202,22 @@ export abstract class BaseScraper {
    * Outputs to console but in a structured format that can be easily redirected
    * or parsed by log aggregation tools
    */
-  protected log(level: 'info' | 'warn' | 'error', message: string, data?: Record<string, unknown>): void {
+  protected log(
+    level: 'info' | 'warn' | 'error',
+    message: string,
+    data?: Record<string, unknown>
+  ): void {
     const timestamp = new Date().toISOString()
-    const logMethod = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
-    
+    const logMethod =
+      level === 'error' ? console.error : level === 'warn' ? console.warn : console.log
+
     // Check if we're in a TTY (interactive terminal) for colored output
     if (process.stdout.isTTY) {
       // Human-readable format for development
       const dataStr = data && Object.keys(data).length > 0 ? ` ${JSON.stringify(data)}` : ''
-      logMethod(`[${timestamp}] [${level.toUpperCase()}] [${this.config.state}] ${message}${dataStr}`)
+      logMethod(
+        `[${timestamp}] [${level.toUpperCase()}] [${this.config.state}] ${message}${dataStr}`
+      )
     } else {
       // Structured JSON format for production/logging systems
       const logEntry = {
@@ -204,23 +236,23 @@ export abstract class BaseScraper {
    */
   protected validateFiling(filing: Partial<UCCFiling>): { valid: boolean; errors: string[] } {
     const errors: string[] = []
-    
+
     if (!filing.filingNumber || filing.filingNumber.trim() === '') {
       errors.push('Missing filing number')
     }
-    
+
     if (!filing.debtorName || filing.debtorName.trim() === '') {
       errors.push('Missing debtor name')
     }
-    
+
     if (!filing.securedParty || filing.securedParty.trim() === '') {
       errors.push('Missing secured party')
     }
-    
+
     if (!filing.filingDate || filing.filingDate.trim() === '') {
       errors.push('Missing filing date')
     }
-    
+
     return {
       valid: errors.length === 0,
       errors
@@ -243,7 +275,9 @@ export abstract class BaseScraper {
       if (validation.valid) {
         validatedFilings.push(filing as UCCFiling)
       } else {
-        validationErrors.push(`Filing ${index + 1} validation errors: ${validation.errors.join(', ')}`)
+        validationErrors.push(
+          `Filing ${index + 1} validation errors: ${validation.errors.join(', ')}`
+        )
       }
     })
 

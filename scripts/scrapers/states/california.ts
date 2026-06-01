@@ -5,7 +5,7 @@
  * Uses Puppeteer for real web scraping with anti-detection measures
  */
 
-import { BaseScraper, ScraperResult } from '../base-scraper'
+import { BaseScraper, ScraperResult, SearchOptions } from '../base-scraper'
 import puppeteer, { Browser, Page } from 'puppeteer'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -43,7 +43,8 @@ export class CaliforniaScraper extends BaseScraper {
           '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
-          '--window-size=1920x1080'
+          '--window-size=1920x1080',
+          '--ignore-certificate-errors'
         ]
       })
     }
@@ -107,7 +108,7 @@ export class CaliforniaScraper extends BaseScraper {
   /**
    * Search for UCC filings in California
    */
-  async search(companyName: string): Promise<ScraperResult> {
+  async search(companyName: string, options?: SearchOptions): Promise<ScraperResult> {
     if (!this.validateSearch(companyName)) {
       this.log('error', 'Invalid company name provided', { companyName })
       return {
@@ -117,16 +118,17 @@ export class CaliforniaScraper extends BaseScraper {
       }
     }
 
-    this.log('info', 'Starting UCC search', { companyName })
+    const searchBy = options?.searchBy ?? 'debtor'
+    this.log('info', 'Starting UCC search', { companyName, searchBy })
 
     // Rate limiting - wait 12 seconds between requests (5 per minute)
     await this.sleep(12000)
 
-    const searchUrl = this.getManualSearchUrl(companyName)
+    const searchUrl = this.getManualSearchUrl(companyName, searchBy)
 
     try {
       const { result, retryCount } = await this.retryWithBackoff(async () => {
-        return await this.performSearch(companyName, searchUrl)
+        return await this.performSearch(companyName, searchUrl, searchBy)
       }, `CA UCC search for ${companyName}`)
 
       this.log('info', 'UCC search completed successfully', {
@@ -135,10 +137,12 @@ export class CaliforniaScraper extends BaseScraper {
         retryCount
       })
 
-      return {
+      const filtered = {
         ...result,
-        retryCount
+        retryCount,
+        filings: result.filings ? this.filterByDateRange(result.filings, options) : []
       }
+      return filtered
     } catch (error) {
       this.log('error', 'UCC search failed after all retries', {
         companyName,
@@ -160,7 +164,11 @@ export class CaliforniaScraper extends BaseScraper {
    * NOTE: California UCC search is through bizfileonline.sos.ca.gov
    * Offers free searches but may require account for advanced features
    */
-  private async performSearch(companyName: string, searchUrl: string): Promise<ScraperResult> {
+  private async performSearch(
+    companyName: string,
+    searchUrl: string,
+    searchBy: 'debtor' | 'securedParty' = 'debtor'
+  ): Promise<ScraperResult> {
     let page: Page | null = null
     let result: ScraperResult | null = null
     const finalize = (next: ScraperResult): ScraperResult => {
@@ -254,20 +262,73 @@ export class CaliforniaScraper extends BaseScraper {
         // Continue anyway as some searches might be available without login
       }
 
-      const possibleSelectors = [
-        'input[name="debtorName"]',
-        'input[name="debtor_name"]',
-        'input[name="DebtorName"]',
-        'input[name="searchCriteria"]',
-        'input[name="SearchCriteria"]',
-        'input[id="debtorName"]',
-        'input[id="debtor_name"]',
-        'input[id="searchCriteria"]',
-        'input[placeholder*="Debtor"]',
-        'input[placeholder*="debtor"]',
-        'input[placeholder*="Name"]',
-        'input[type="text"]'
-      ]
+      // If searching by secured party, try to select that option from the search type dropdown
+      if (searchBy === 'securedParty') {
+        await page
+          .evaluate(() => {
+            // Try select dropdown
+            const sel = document.querySelector(
+              'select[name="searchType"], select[id="searchType"], select[name="SearchType"]'
+            ) as HTMLSelectElement | null
+            if (sel) {
+              const opt = Array.from(sel.options).find(
+                (o) =>
+                  o.value.toLowerCase().includes('secured') ||
+                  o.text.toLowerCase().includes('secured')
+              )
+              if (opt) {
+                sel.value = opt.value
+                sel.dispatchEvent(new Event('change', { bubbles: true }))
+              }
+            }
+            // Try radio buttons
+            const radios = Array.from(
+              document.querySelectorAll('input[type="radio"]')
+            ) as HTMLInputElement[]
+            const spRadio = radios.find((r) => {
+              const label = document.querySelector(`label[for="${r.id}"]`)
+              return (
+                label?.textContent?.toLowerCase().includes('secured') ||
+                r.value.toLowerCase().includes('secured')
+              )
+            })
+            if (spRadio && !spRadio.checked) {
+              spRadio.click()
+            }
+          })
+          .catch(() => {})
+        await this.sleep(500)
+      }
+
+      const possibleSelectors =
+        searchBy === 'securedParty'
+          ? [
+              'input[name="securedPartyName"]',
+              'input[name="secured_party_name"]',
+              'input[name="SecuredPartyName"]',
+              'input[name="spName"]',
+              'input[id="securedPartyName"]',
+              'input[placeholder*="Secured"]',
+              'input[placeholder*="secured"]',
+              'input[placeholder*="Party"]',
+              'input[name="searchCriteria"]',
+              'input[name="SearchCriteria"]',
+              'input[type="text"]'
+            ]
+          : [
+              'input[name="debtorName"]',
+              'input[name="debtor_name"]',
+              'input[name="DebtorName"]',
+              'input[name="searchCriteria"]',
+              'input[name="SearchCriteria"]',
+              'input[id="debtorName"]',
+              'input[id="debtor_name"]',
+              'input[id="searchCriteria"]',
+              'input[placeholder*="Debtor"]',
+              'input[placeholder*="debtor"]',
+              'input[placeholder*="Name"]',
+              'input[type="text"]'
+            ]
 
       const fillSearchFormInFrame = async (frame: Frame): Promise<boolean> => {
         try {
@@ -366,8 +427,9 @@ export class CaliforniaScraper extends BaseScraper {
           usingPreloadedResults = true
           this.log('info', 'Search form not found; using preloaded results page', { companyName })
         } else {
-          this.log('warn', 'Could not find debtor name search field, retrying on base URL', {
-            companyName
+          this.log('warn', 'Could not find search field, retrying on base URL', {
+            companyName,
+            searchBy
           })
           await page.goto(this.config.baseUrl, {
             waitUntil: 'domcontentloaded',
@@ -390,11 +452,10 @@ export class CaliforniaScraper extends BaseScraper {
       }
 
       if (!searchFormFilled && !usingPreloadedResults) {
-        this.log('warn', 'Could not find debtor name search field', { companyName })
+        this.log('warn', 'Could not find search field', { companyName, searchBy })
         return finalize({
           success: false,
-          error:
-            'Unable to locate debtor name search field on California UCC portal. Portal structure may have changed or requires login.',
+          error: `Unable to locate ${searchBy === 'securedParty' ? 'secured party' : 'debtor'} name search field on California UCC portal. Portal structure may have changed or requires login.`,
           searchUrl: page.url(),
           timestamp: new Date().toISOString()
         })
@@ -724,8 +785,8 @@ export class CaliforniaScraper extends BaseScraper {
    * NOTE: California UCC search through bizfileonline.sos.ca.gov
    * Offers free searches with optional account for advanced features
    */
-  getManualSearchUrl(companyName: string): string {
-    // California may support URL parameters, try common patterns
-    return `${this.config.baseUrl}?searchType=debtor&searchCriteria=${encodeURIComponent(companyName)}`
+  getManualSearchUrl(companyName: string, searchBy: 'debtor' | 'securedParty' = 'debtor'): string {
+    const type = searchBy === 'securedParty' ? 'securedParty' : 'debtor'
+    return `${this.config.baseUrl}?searchType=${type}&searchCriteria=${encodeURIComponent(companyName)}`
   }
 }

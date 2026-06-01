@@ -32,6 +32,9 @@ program
   .requiredOption('-s, --state <code>', 'State code (CA, TX, FL)')
   .option('-o, --output <file>', 'Output file path (JSON)', './output.json')
   .option('--csv', 'Export as CSV instead of JSON')
+  .option('--search-by <type>', 'Search by "debtor" or "securedParty"', 'debtor')
+  .option('--date-from <date>', 'Filter filings from this date (YYYY-MM-DD)')
+  .option('--date-to <date>', 'Filter filings to this date (YYYY-MM-DD)')
   .action(async (options) => {
     const spinner = ora('Initializing scraper...').start()
 
@@ -43,7 +46,10 @@ program
         type: 'scrape-ucc',
         payload: {
           companyName: options.company,
-          state: options.state.toUpperCase()
+          state: options.state.toUpperCase(),
+          searchBy: options.searchBy,
+          dateFrom: options.dateFrom,
+          dateTo: options.dateTo
         }
       })
 

@@ -5,7 +5,7 @@
  * Uses Puppeteer for real web scraping with anti-detection measures
  */
 
-import { BaseScraper, ScraperResult } from '../base-scraper'
+import { BaseScraper, ScraperResult, SearchOptions } from '../base-scraper'
 import puppeteer, { Browser, Page } from 'puppeteer'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
@@ -39,7 +39,8 @@ export class FloridaScraper extends BaseScraper {
           '--disable-dev-shm-usage',
           '--disable-accelerated-2d-canvas',
           '--disable-gpu',
-          '--window-size=1920x1080'
+          '--window-size=1920x1080',
+          '--ignore-certificate-errors'
         ]
       })
     }
@@ -100,7 +101,7 @@ export class FloridaScraper extends BaseScraper {
   /**
    * Search for UCC filings in Florida
    */
-  async search(companyName: string): Promise<ScraperResult> {
+  async search(companyName: string, options?: SearchOptions): Promise<ScraperResult> {
     if (!this.validateSearch(companyName)) {
       this.log('error', 'Invalid company name provided', { companyName })
       return {
@@ -110,7 +111,8 @@ export class FloridaScraper extends BaseScraper {
       }
     }
 
-    this.log('info', 'Starting UCC search', { companyName })
+    const searchBy = options?.searchBy ?? 'debtor'
+    this.log('info', 'Starting UCC search', { companyName, searchBy })
 
     // Rate limiting - wait 12 seconds between requests (5 per minute)
     await this.sleep(12000)
@@ -119,7 +121,7 @@ export class FloridaScraper extends BaseScraper {
 
     try {
       const { result, retryCount } = await this.retryWithBackoff(async () => {
-        return await this.performSearch(companyName, searchUrl)
+        return await this.performSearch(companyName, searchUrl, searchBy)
       }, `FL UCC search for ${companyName}`)
 
       this.log('info', 'UCC search completed successfully', {
@@ -130,7 +132,8 @@ export class FloridaScraper extends BaseScraper {
 
       return {
         ...result,
-        retryCount
+        retryCount,
+        filings: result.filings ? this.filterByDateRange(result.filings, options) : []
       }
     } catch (error) {
       this.log('error', 'UCC search failed after all retries', {
@@ -153,7 +156,11 @@ export class FloridaScraper extends BaseScraper {
    * NOTE: Florida UCC is managed by Image API, LLC through floridaucc.com
    * The search is picky about exact name matches and formatting.
    */
-  private async performSearch(companyName: string, searchUrl: string): Promise<ScraperResult> {
+  private async performSearch(
+    companyName: string,
+    searchUrl: string,
+    searchBy: 'debtor' | 'securedParty' = 'debtor'
+  ): Promise<ScraperResult> {
     let page: Page | null = null
     let result: ScraperResult | null = null
     const finalize = (next: ScraperResult): ScraperResult => {
@@ -267,35 +274,87 @@ export class FloridaScraper extends BaseScraper {
         await this.sleep(3000)
       }
 
-      // Look for debtor name search field (Florida UCC uses a "keyword" input)
-      const searchFormFilled = await page.evaluate((name) => {
-        const possibleSelectors = [
-          'input[name="keyword"]',
-          'input[placeholder*="Organization"]',
-          'input[placeholder*="organization"]',
-          'input[placeholder*="Debtor"]',
-          'input[placeholder*="debtor"]',
-          'input[type="text"]'
-        ]
+      // If secured party search, try to select that search type first
+      if (searchBy === 'securedParty') {
+        await page
+          .evaluate(() => {
+            // Try dropdown
+            const sel = document.querySelector(
+              'select[name="searchType"], select[id="searchType"]'
+            ) as HTMLSelectElement | null
+            if (sel) {
+              const opt = Array.from(sel.options).find(
+                (o) =>
+                  o.value.toLowerCase().includes('secured') ||
+                  o.text.toLowerCase().includes('secured')
+              )
+              if (opt) {
+                sel.value = opt.value
+                sel.dispatchEvent(new Event('change', { bubbles: true }))
+              }
+            }
+            // Try buttons labeled "Secured Party"
+            const btns = Array.from(document.querySelectorAll('button, a')) as HTMLElement[]
+            const spBtn = btns.find((b) => b.textContent?.toLowerCase().includes('secured party'))
+            if (spBtn) spBtn.click()
+            // Try radio buttons
+            const radios = Array.from(
+              document.querySelectorAll('input[type="radio"]')
+            ) as HTMLInputElement[]
+            const spRadio = radios.find((r) => {
+              const label = document.querySelector(`label[for="${r.id}"]`)
+              return (
+                label?.textContent?.toLowerCase().includes('secured') ||
+                r.value.toLowerCase().includes('secured')
+              )
+            })
+            if (spRadio && !spRadio.checked) spRadio.click()
+          })
+          .catch(() => {})
+        await this.sleep(800)
+      }
 
-        for (const selector of possibleSelectors) {
-          const input = document.querySelector(selector) as HTMLInputElement | null
-          if (input && !input.disabled && input.offsetParent !== null) {
-            input.value = name
-            input.dispatchEvent(new Event('input', { bubbles: true }))
-            input.dispatchEvent(new Event('change', { bubbles: true }))
-            return true
+      // Look for search field (Florida UCC uses a "keyword" or name input)
+      const searchFormFilled = await page.evaluate(
+        (name, isSP) => {
+          const possibleSelectors = isSP
+            ? [
+                'input[name="securedPartyName"]',
+                'input[placeholder*="Secured"]',
+                'input[placeholder*="secured"]',
+                'input[name="keyword"]',
+                'input[placeholder*="Organization"]',
+                'input[type="text"]'
+              ]
+            : [
+                'input[name="keyword"]',
+                'input[placeholder*="Organization"]',
+                'input[placeholder*="organization"]',
+                'input[placeholder*="Debtor"]',
+                'input[placeholder*="debtor"]',
+                'input[type="text"]'
+              ]
+
+          for (const selector of possibleSelectors) {
+            const input = document.querySelector(selector) as HTMLInputElement | null
+            if (input && !input.disabled && input.offsetParent !== null) {
+              input.value = name
+              input.dispatchEvent(new Event('input', { bubbles: true }))
+              input.dispatchEvent(new Event('change', { bubbles: true }))
+              return true
+            }
           }
-        }
-        return false
-      }, companyName)
+          return false
+        },
+        companyName,
+        searchBy === 'securedParty'
+      )
 
       if (!searchFormFilled) {
-        this.log('warn', 'Could not find debtor name search field', { companyName })
+        this.log('warn', 'Could not find search field', { companyName, searchBy })
         return {
           success: false,
-          error:
-            'Unable to locate debtor name search field on Florida UCC portal. Portal structure may have changed.',
+          error: `Unable to locate ${searchBy === 'securedParty' ? 'secured party' : 'debtor'} name search field on Florida UCC portal. Portal structure may have changed.`,
           searchUrl: page.url(),
           timestamp: new Date().toISOString()
         }

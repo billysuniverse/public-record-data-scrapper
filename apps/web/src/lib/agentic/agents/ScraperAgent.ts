@@ -16,19 +16,19 @@ import {
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - scripts directory not in tsconfig include; import resolved by bundler
-import { CaliforniaScraper } from '../../../../scripts/scrapers/states/california'
+import { CaliforniaScraper } from '../../../../../../scripts/scrapers/states/california'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - scripts directory not in tsconfig include; import resolved by bundler
-import { TexasScraper } from '../../../../scripts/scrapers/states/texas'
+import { TexasScraper } from '../../../../../../scripts/scrapers/states/texas'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - scripts directory not in tsconfig include; import resolved by bundler
-import { FloridaScraper } from '../../../../scripts/scrapers/states/florida'
+import { FloridaScraper } from '../../../../../../scripts/scrapers/states/florida'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - scripts directory not in tsconfig include; import resolved by bundler
-import { NewYorkScraper } from '../../../../scripts/scrapers/states/newyork'
+import { NewYorkScraper } from '../../../../../../scripts/scrapers/states/newyork'
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore - scripts directory not in tsconfig include; import resolved by bundler
-import { BaseScraper } from '../../../../scripts/scrapers/base-scraper'
+import { BaseScraper, SearchOptions } from '../../../../../../scripts/scrapers/base-scraper'
 
 export class ScraperAgent extends BaseAgent {
   private scrapers: Map<string, BaseScraper> = new Map()
@@ -77,7 +77,13 @@ export class ScraperAgent extends BaseAgent {
 
   async executeTask(task: AgentTask): Promise<AgentTaskResult> {
     const { type, payload } = task
-    const data = payload as { companyName?: string; state?: string }
+    const data = payload as {
+      companyName?: string
+      state?: string
+      searchBy?: string
+      dateFrom?: string
+      dateTo?: string
+    }
 
     try {
       switch (type) {
@@ -89,7 +95,11 @@ export class ScraperAgent extends BaseAgent {
               timestamp: new Date().toISOString()
             }
           }
-          return await this.scrapeUCC(data.companyName, data.state)
+          return await this.scrapeUCC(data.companyName, data.state, {
+            searchBy: (data.searchBy as SearchOptions['searchBy']) ?? 'debtor',
+            dateFrom: data.dateFrom,
+            dateTo: data.dateTo
+          })
         case 'get-manual-url':
           if (!data.companyName || !data.state) {
             return {
@@ -126,7 +136,11 @@ export class ScraperAgent extends BaseAgent {
     }
   }
 
-  private async scrapeUCC(companyName: string, state: string): Promise<AgentTaskResult> {
+  private async scrapeUCC(
+    companyName: string,
+    state: string,
+    options?: SearchOptions
+  ): Promise<AgentTaskResult> {
     const scraper = this.scrapers.get(state.toUpperCase())
 
     if (!scraper) {
@@ -140,7 +154,7 @@ export class ScraperAgent extends BaseAgent {
       }
     }
 
-    const result = await scraper.search(companyName)
+    const result = await scraper.search(companyName, options)
 
     return {
       success: result.success,
