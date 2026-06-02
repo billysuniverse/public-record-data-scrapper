@@ -117,7 +117,7 @@ export class FloridaScraper extends BaseScraper {
     // Rate limiting - wait 12 seconds between requests (5 per minute)
     await this.sleep(12000)
 
-    const searchUrl = this.getManualSearchUrl(companyName)
+    const searchUrl = this.getManualSearchUrl(companyName, searchBy)
 
     try {
       const { result, retryCount } = await this.retryWithBackoff(async () => {
@@ -641,8 +641,13 @@ export class FloridaScraper extends BaseScraper {
    * NOTE: Florida UCC is managed by Image API, LLC at floridaucc.com
    * Direct URL search may not work - users will need to use the search form.
    */
-  getManualSearchUrl(companyName: string): string {
-    // Florida UCC search supports query params for preloading the search form
-    return `${this.config.baseUrl}?text=${encodeURIComponent(companyName)}&searchOptionType=OrganizationDebtorName&searchOptionSubOption=FiledCompactDebtorNameList&searchCategory=Exact`
+  getManualSearchUrl(companyName: string, searchBy: 'debtor' | 'securedParty' = 'debtor'): string {
+    const searchOptionType =
+      searchBy === 'securedParty' ? 'OrganizationSecuredPartyName' : 'OrganizationDebtorName'
+    const searchOptionSubOption =
+      searchBy === 'securedParty'
+        ? 'FiledCompactSecuredPartyNameList'
+        : 'FiledCompactDebtorNameList'
+    return `${this.config.baseUrl}?text=${encodeURIComponent(companyName)}&searchOptionType=${searchOptionType}&searchOptionSubOption=${searchOptionSubOption}&searchCategory=Contains`
   }
 }
