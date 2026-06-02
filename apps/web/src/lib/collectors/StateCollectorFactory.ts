@@ -15,6 +15,7 @@ import type { StateCollector } from './types'
 import { createCAApiCollector } from './state-collectors/CAApiCollector'
 import { createTXBulkCollector } from './state-collectors/TXBulkCollector'
 import { FLVendorCollector, createFLVendorCollector } from './state-collectors/FLVendorCollector'
+import { createNYApifyCollector } from './state-collectors/NYApifyCollector'
 
 /**
  * Access method types for state data
@@ -140,7 +141,8 @@ const STATE_CONFIGS: Record<string, StateConfig> = {
   NY: {
     code: 'NY',
     name: 'New York',
-    accessMethods: [],
+    accessMethods: ['scrape'],
+    activeMethod: 'scrape',
     hasApi: false,
     hasBulk: false,
     requiresVendor: false,
@@ -148,9 +150,9 @@ const STATE_CONFIGS: Record<string, StateConfig> = {
       api: null,
       bulk: null,
       vendor: null,
-      scrape: 0
+      scrape: 1.5 // Apify actor cost (estimated per 1000 queries)
     },
-    notes: 'NY portal ingestion is not wired to a production collector yet'
+    notes: 'NY UCC via Apify actor fortuitous_pirate~ucc-lien-search-ny. Requires APIFY_API_TOKEN.'
   }
 }
 
@@ -323,8 +325,12 @@ export class StateCollectorFactory {
    * Create scraper-based collector
    */
   private createScraperCollector(stateCode: string): StateCollector | undefined {
-    void stateCode
-    return undefined
+    switch (stateCode) {
+      case 'NY':
+        return createNYApifyCollector() ?? undefined
+      default:
+        return undefined
+    }
   }
 
   /**
